@@ -1,127 +1,142 @@
-# Zero-Knowledge End-to-End Encryption (E2EE) SDK & Telehealth Suite
+# Zero-Knowledge End-to-End Encryption (E2EE) SDK & Blind Cloud Router
 
-A zero-knowledge client-side encryption framework featuring WebCrypto API key derivation, hardware/browser-isolated non-exportable cryptographic vaults (IndexedDB), and a stateless Node.js WebSocket router.
+A lightweight, zero-knowledge cryptographic SDK for browser environments paired with a stateless WebSocket relay. The SDK handles client-side key generation, hardware/browser-level key vaulting, and message encryption before any packet reaches the wire. The cloud router operates on a zero-knowledge security model—processing strictly opaque ciphertext with zero access to private keys or decryption capabilities.
 
 ---
 
-## 📌 Executive Summary & Architecture
+## Architecture Overview
 
-Modern cloud communication relays frequently expose user communications to insider threats, man-in-the-middle attacks, and cloud subpoena disclosures. This project implements a true **Zero-Knowledge Architecture**:
-- Cryptographic keys are generated strictly in-browser via the **WebCrypto API**.
-- Private keys are non-exportable and permanently isolated inside **IndexedDB**.
-- The intermediate **Cloud Router (Node.js + Socket.io)** acts solely as a blind packet switch; it holds no decryption keys and routes exclusively opaque ciphertexts.
-
-```
-+-----------------------------------------------------------------------------------+
-|                                CLIENT RUNTIME A                                   |
-|  [Host UI] ---> [WebCrypto Engine: AES-256-GCM] ---> [IndexedDB (Private Keys)]   |
-+----------------------------------------+------------------------------------------+
-                                         | (Ciphertext + 96-bit IV)
-                                         v
-+-----------------------------------------------------------------------------------+
-|                        STATELESS CLOUD ROUTER (Node.js)                           |
-|       - Inspects only recipient identity (to: "Bob")                              |
-|       - Zero access to plaintext or session derivation keys                       |
-|       - Ephemeral in-memory fallback queue for offline buffering                  |
-+----------------------------------------+------------------------------------------+
-                                         | (Blind Packet Relay)
-                                         v
-+-----------------------------------------------------------------------------------+
-|                                CLIENT RUNTIME B                                   |
-|  [IndexedDB (Private Keys)] ---> [WebCrypto Engine: Decrypt] ---> [Host UI]      |
-+-----------------------------------------------------------------------------------+
+```text
+[ Client A (SDK Instance) ]             [ Stateless Cloud Router ]            [ Client B (SDK Instance) ]
+             |                                       |                                     |
+             |--- 1. Generate ECDH Keypair (P-256) ->|                                     |
+             |       (Private Key -> IndexedDB)      |                                     |
+             |       (Public Key -> Wire)            |--- 2. Broadcast Public Key -------->|
+             |                                       |                                     |
+             |                                       |<-- 3. Register Recipient Keys ------|
+             |<-- 4. Receive Public Key Directory ---|                                     |
+             |                                       |                                     |
+             |--- 5. Derive AES-256-GCM Key          |                                     |
+             |       via ECDH(Priv_A, Pub_B)         |                                     |
+             |                                       |                                     |
+             |--- 6. Encrypt Payload + Generate IV ->|                                     |
+             |       [Ciphertext + 96-bit IV]        |                                     |
+             |                                       |--- 7. Forward Opaque Bytes -------->|
+             |                                       |       (Blind Transit / Zero Keys)   |
+             |                                       |                                     |--- 8. Derive Shared Key
+             |                                       |                                     |       via ECDH(Priv_B, Pub_A)
+             |                                       |                                     |
+             |                                       |                                     |--- 9. Decrypt AES-256-GCM
+             |                                       |                                     |       & Verify Tag
 ```
 
 ---
 
-## 🔐 Cryptographic Foundation
+## Cryptographic Specification
 
-### 1. Key Agreement: Elliptic-Curve Diffie-Hellman (ECDH)
-Users establish shared session keys without exposing private material over the network.
-- Base Curve: **NIST P-256** ($secp256r1$).
-- Base generator point: $G$.
-- Alice has secret scalar $a$; Public key: $A = a \cdot G$.
-- Bob has secret scalar $b$; Public key: $B = b \cdot G$.
-- Both derive the identical shared secret scalar $S$:
-  $$S = a \cdot B = a \cdot (b \cdot G) = b \cdot (a \cdot G) = b \cdot A$$
-
-### 2. Authenticated Symmetric Encryption: AES-256-GCM
-- **256-Bit Key Space:** Derived from the ECDH shared secret via internal KDF.
-- **Unique IV (Initialization Vector):** 96-bit cryptographically secure random value generated for every single message (`window.crypto.getRandomValues`), preventing replay attacks and pattern recognition.
-- **Galois/Counter Mode (GCM) Authentication Tag:** Guarantees payload integrity and authenticity. Any bit modified during network transit immediately voids the integrity tag and causes decryption rejection.
+* **Key Agreement:** Elliptic-Curve Diffie-Hellman (**ECDH**) using the **NIST P-256 (`secp256r1`)** curve.
+  * Scalar multiplication on elliptic curves is commutative. Both peers compute an identical symmetric master secret without transmitting sensitive key material over the network.
+* **Symmetric Encryption:** **AES-256-GCM** (Galois/Counter Mode).
+  * Provides authenticated encryption with associated data (AEAD) to guarantee confidentiality and ciphertext integrity.
+  * Enforces a fresh, cryptographically secure **96-bit (12-byte) Initialization Vector (IV)** per transmission.
+* **Key Isolation & Storage:** The browser native **WebCrypto API** (`SubtleCrypto`) generates keys with `extractable: false` restrictions where applicable, storing persistent session identities locally inside **IndexedDB**.
+* **Zero-Knowledge Cloud Router:** The Node.js/Socket.io backend acts purely as a blind packet switchboard. It maps transient socket connections to identities, holds an in-memory queue for offline delivery, and inspects only routing metadata (`to`, `from`). Plaintext is inaccessible to server memory.
 
 ---
 
-## 📂 Repository Structure
+## Repository Structure
 
-```
-├── zk-e2ee-sdk/         # Core TypeScript SDK Package (WebCrypto + IndexedDB + Socket client)
-│   ├── src/             # Source TypeScript files
-│   ├── tsconfig.json    # TypeScript compiler configuration
-│   └── package.json     # Package manifests
-│
-├── zk-cloud-router/     # Blind message relay and public-key directory (Node.js)
-│   ├── server.js        # Socket.io stateless relay & buffering logic
+```text
+ZK-E2EE-SDK/
+├── src/                  # Core TypeScript cryptographic engine
+│   └── index.ts          # Keygen, vaulting, ECDH derivation, AES-GCM primitives
+├── dist/                 # Compiled JavaScript output
+├── zk-cloud-router/      # Stateless WebSocket relay server
+│   ├── server.js         # Socket.io blind message relay & peer directory
 │   └── package.json
-│
-├── demo_app/            # "SecureMed" Telehealth clinical demonstration app (Vite)
-│   ├── index.html       # Clinical portal interface + Live In-Flight Packet Inspector
-│   ├── main.js          # Client driver consuming zk-e2ee-sdk
-│   └── package.json
-│
-└── .gitignore           # Git ignore definitions
+├── package.json          # Root SDK build configuration & dependencies
+├── tsconfig.json         # TypeScript compiler configuration
+├── .gitignore            # Git exclusion rules
+├── LICENSE               # MIT License
+└── README.md
 ```
 
 ---
 
-## 🚀 Setup & Execution Guide
+## Installation & Setup
 
 ### Prerequisites
-- Node.js (v18.0.0 or higher)
-- npm (v9.0.0 or higher)
+* Node.js: v18.x or later
+* npm: v9.x or later
 
 ---
 
-### Step 1: Compile the Core SDK
-Navigate to the SDK directory and compile the TypeScript source into the distribution bundle:
+### 1. Build the SDK
+
+From the root project directory:
+
 ```bash
-cd zk-e2ee-sdk
+# Install SDK development dependencies
 npm install
-npx tsc
+
+# Compile TypeScript source into dist/
+npm run build
 ```
-This generates the `dist/` directory containing the compiled JavaScript and type declarations (`.d.ts`).
 
 ---
 
-### Step 2: Start the Stateless Cloud Router
-Open a dedicated terminal to launch the blind message relay:
+### 2. Run the Cloud Router
+
+In a separate terminal window:
+
 ```bash
 cd zk-cloud-router
+
+# Install router dependencies
 npm install
+
+# Start the blind relay
 node server.js
 ```
-The router will start listening on `http://localhost:4000`.
+
+The router will launch and listen for client WebSocket connections on `http://localhost:4000`.
 
 ---
 
-### Step 3: Launch the "SecureMed" Telehealth Demonstration
-Open another terminal to serve the clinical portal:
-```bash
-cd demo_app
-npm install
-npm run dev
+## SDK Integration Example
+
+Consume the compiled SDK within any frontend web client:
+
+```javascript
+import { ZkEncryptionSDK } from './dist/index.js';
+
+// 1. Initialize SDK instance
+const client = new ZkEncryptionSDK('dr_alice', 'http://localhost:4000');
+await client.connect();
+
+// 2. Register listener for decrypted incoming transmissions
+client.onMessageReceived((senderId, plaintext) => {
+  console.log(`[DECRYPTED MESSAGE from ${senderId}]:`, plaintext);
+});
+
+// 3. Establish session with peer and dispatch encrypted payload
+await client.establishSession('patient_bob', bobPublicKey);
+await client.sendSecureMessage('patient_bob', 'Confidential Medical Record');
 ```
 
-1. Open **two independent browser windows** side-by-side at `http://localhost:5173`.
-2. Window 1: Initialize identity as **"Dr. Alice"**.
-3. Window 2: Initialize identity as **"Patient Bob"**.
-4. In Dr. Alice's window, choose **Patient Bob** from the peer selection dropdown.
-5. Transmit a confidential medical note.
+---
+
+## Verifying Zero-Knowledge Compliance
+
+1. Connect clients to the running router.
+2. Monitor the `zk-cloud-router` terminal stdout during message exchange.
+3. Observe the intercepted network frame:
+   * **ciphertext**: Array of raw, pseudo-random byte integers.
+   * **iv**: 12-byte initialization vector.
+   * **plaintext**: Completely inaccessible to the relay process.
 
 ---
 
-## 🔍 Verification & Demonstration Notes
+## License
 
-1. **Live Inspector Panel:** The right-hand column of the demo portal displays the in-flight packet payload, exposing the raw 96-bit IV and AES-GCM ciphertext bytes.
-2. **Server Console:** Check the `zk-cloud-router` terminal window; the server will log incoming relay packets showing only recipient metadata and opaque byte arrays with zero access to plaintext.
-3. **Browser DevTools (F12):** Navigate to `Network -> WS -> Messages` to confirm that packets emitted over the WebSocket interface are completely encrypted prior to hitting the network adapter.
+MIT
